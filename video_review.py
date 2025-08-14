@@ -1,139 +1,142 @@
-import tkinter as tk
-from tkinter import ttk
-import subprocess, cv2, re, datetime
-from PIL import Image, ImageTk
+import sys
+import cv2
+import datetime
+from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QPushButton, QVBoxLayout, QComboBox, QHBoxLayout
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QImage, QPixmap
 
-process = None
-cap1, cap2 = None, None
+class WebcamRecorder(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Webcam Recorder")
+        self.setGeometry(200, 200, 800, 600)
 
-# 🔹 Detect cameras using FFmpeg
-def get_cameras():
-    result = subprocess.run(
-        ['ffmpeg', '-list_devices', 'true', '-f', 'dshow', '-i', 'dummy'],
-        stderr=subprocess.PIPE, text=True
-    )
-    return re.findall(r'"([^"]+)" \(video\)', result.stderr)
+        self.captures = []
+        self.recording = False
+        self.outs = []
+        self.timer = QTimer()
 
-# 🔹 Start preview with OpenCV
-def start_preview():
-    global cap1, cap2
-    idx1 = cam1_menu.current()
-    idx2 = cam2_menu.current()
+        # Camera selection dropdowns
+        self.cam1_select = QComboBox()
+        self.cam2_select = QComboBox()
+        for i in range(5):  # Check first 5 indices
+            self.cam1_select.addItem(f"Camera {i}")
+            self.cam2_select.addItem(f"Camera {i}")
 
-    if idx1 >= 0:
-        cap1 = cv2.VideoCapture(idx1, cv2.CAP_DSHOW)
-    if idx2 >= 0:
-        cap2 = cv2.VideoCapture(idx2, cv2.CAP_DSHOW)
+        # Preview label
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignCenter)
 
-    update_frames()
+        # Buttons
+        self.start_btn = QPushButton("Start Recording")
+        self.stop_btn = QPushButton("Stop Recording")
+        self.stop_btn.setEnabled(False)
 
-def update_frames():
-    global cap1, cap2
-    if cap1:
-        ret, frame = cap1.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = ImageTk.PhotoImage(Image.fromarray(frame))
-            preview1.config(image=img)
-            preview1.image = img
+        # Layout
+        layout = QVBoxLayout()
+        cam_layout = QHBoxLayout()
+        cam_layout.addWidget(self.cam1_select)
+        cam_layout.addWidget(self.cam2_select)
+        layout.addLayout(cam_layout)
+        layout.addWidget(self.preview_label)
+        btn_layout = QHBoxLayout()
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.stop_btn)
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
 
-    if cap2:
-        ret, frame = cap2.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = ImageTk.PhotoImage(Image.fromarray(frame))
-            preview2.config(image=img)
-            preview2.image = img
+        # Connections
+        self.start_btn.clicked.connect(self.start_recording)
+        self.stop_btn.clicked.connect(self.stop_recording)
+        self.timer.timeout.connect(self.update_preview)
 
-    root.after(30, update_frames)
+    def start_recording(self):
+        # Open cameras
+        cam1_index = self.cam1_select.currentIndex()
+        cam2_index = self.cam2_select.currentIndex()
 
-# 🔹 Start recording with FFmpeg
-def start_recording():
-    global process
-    cam1 = cam1_var.get()
-    cam2 = cam2_var.get()
+        self.captures = []
+        self.outs = []
 
-    if not cam1 and not cam2:
-        status_label.config(text="⚠ Please select at least 1 camera!", fg="red")
-        return
+        # Open first camera
+        cap1 = cv2.VideoCapture(cam1_index)
+        if cap1.isOpened():
+            self.captures.append(cap1)
+            self.outs.append(self.create_writer(cap1, f"camera1_{self.timestamp()}.avi"))
 
-    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    ffmpeg_cmd = ["ffmpeg", "-y"]
+        # Open second camera (only if different index)
+        if cam2_index != cam1_index:
+            cap2 = cv2.VideoCapture(cam2_index)
+            if cap2.isOpened():
+                self.captures.append(cap2)
+                self.outs.append(self.create_writer(cap2, f"camera2_{self.timestamp()}.avi"))
 
-    if cam1:
-        ffmpeg_cmd += ["-f", "dshow", "-i", f"video={cam1}"]
-    if cam2:
-        ffmpeg_cmd += ["-f", "dshow", "-i", f"video={cam2}"]
+        if not self.captures:
+            print("No camera opened!")
+            return
 
-    # Output for camera 1
-    if cam1:
-        ffmpeg_cmd += [
-            "-map", "0:v",
-            "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p",
-            "-b:v", "5M", "-r", "30", "-s", "1280x720", f"cam1_{ts}.mp4"
-        ]
+        self.recording = True
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.timer.start(30)  # 30ms interval (~33 FPS)
 
-    # Output for camera 2
-    if cam2:
-        idx = 0 if not cam1 else 1
-        ffmpeg_cmd += [
-            "-map", f"{idx}:v",
-            "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p",
-            "-b:v", "5M", "-r", "30", "-s", "1280x720", f"cam2_{ts}.mp4"
-        ]
+    def stop_recording(self):
+        self.recording = False
+        self.timer.stop()
 
-    process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    status_label.config(text="Recording...", fg="green")
+        for cap in self.captures:
+            cap.release()
+        for out in self.outs:
+            out.release()
 
-# 🔹 Stop recording properly
-def stop_recording():
-    global process
-    if process:
-        try:
-            process.stdin.write(b"q")
-            process.stdin.flush()
-            process.wait()
-        except:
-            process.terminate()
-        process = None
-        status_label.config(text="Stopped", fg="red")
+        self.captures = []
+        self.outs = []
+        self.preview_label.clear()
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        print("Recording stopped.")
 
-# 🔹 GUI Setup
-root = tk.Tk()
-root.title("Dual Webcam Recorder")
+    def update_preview(self):
+        if not self.captures:
+            return
 
-cam1_var, cam2_var = tk.StringVar(), tk.StringVar()
+        frames = []
+        for i, cap in enumerate(self.captures):
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
-tk.Label(root, text="Camera 1").pack()
-cam1_menu = ttk.Combobox(root, textvariable=cam1_var, state="readonly")
-cam1_menu.pack()
+            if self.recording:
+                self.outs[i].write(frame)
 
-tk.Label(root, text="Camera 2").pack()
-cam2_menu = ttk.Combobox(root, textvariable=cam2_var, state="readonly")
-cam2_menu.pack()
+            frames.append(frame)
 
-def refresh_cameras():
-    cams = get_cameras()
-    cam1_menu["values"] = cams
-    cam2_menu["values"] = cams
+        if frames:
+            # If two cameras, show side-by-side preview
+            if len(frames) == 2:
+                frame = cv2.hconcat(frames)
+            else:
+                frame = frames[0]
 
-tk.Button(root, text="Refresh Cameras", command=refresh_cameras).pack(pady=5)
-tk.Button(root, text="Start Preview", command=start_preview).pack(pady=5)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = rgb_frame.shape
+            bytes_per_line = ch * w
+            q_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            self.preview_label.setPixmap(QPixmap.fromImage(q_img))
 
-preview_frame = tk.Frame(root)
-preview_frame.pack(pady=10)
+    def create_writer(self, cap, filename):
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return cv2.VideoWriter(filename, fourcc, fps, (width, height))
 
-preview1 = tk.Label(preview_frame)
-preview1.pack(side="left", padx=5)
+    def timestamp(self):
+        return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-preview2 = tk.Label(preview_frame)
-preview2.pack(side="left", padx=5)
 
-tk.Button(root, text="Start Recording", command=start_recording).pack(pady=5)
-tk.Button(root, text="Stop Recording", command=stop_recording).pack(pady=5)
-
-status_label = tk.Label(root, text="Idle", fg="gray")
-status_label.pack(pady=5)
-
-refresh_cameras()
-root.mainloop()
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = WebcamRecorder()
+    window.show()
+    sys.exit(app.exec_())
